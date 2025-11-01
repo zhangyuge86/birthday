@@ -1,4 +1,4 @@
-const STATE_KEYS = {
+﻿const STATE_KEYS = {
   wishes: "wangcan_birthday_wishes_v1",
   stars: "wangcan_birthday_stars_v1",
 };
@@ -11,6 +11,120 @@ const createId = () =>
     : `wish_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 const t = (encoded) => decodeURIComponent(encoded);
 
+const CHINESE_DIGITS = {
+  "\u96F6": 0,
+  "\u4E00": 1,
+  "\u4E8C": 2,
+  "\u4E09": 3,
+  "\u56DB": 4,
+  "\u4E94": 5,
+  "\u516D": 6,
+  "\u4E03": 7,
+  "\u516B": 8,
+  "\u4E5D": 9,
+};
+
+const CHINESE_MONTH_ALIAS = {
+  "\u6B63": 1,
+  "\u51AC": 11,
+  "\u814A": 12,
+};
+
+const lunarFormatter = (() => {
+  if (typeof Intl === "undefined" || typeof Intl.DateTimeFormat !== "function") {
+    return null;
+  }
+  try {
+    return new Intl.DateTimeFormat("zh-CN-u-ca-chinese", {
+      month: "long",
+      day: "numeric",
+    });
+  } catch (error) {
+    console.warn("lunar formatter unavailable", error);
+    return null;
+  }
+})();
+
+function chineseNumberToInt(source) {
+  if (!source) return Number.NaN;
+  let value = source.replace(/[\u65E5\u53F7]/g, "").replace(/\u521D/g, "");
+  if (value === "\u5341") return 10;
+  if (value.startsWith("\u5341")) {
+    const unit = CHINESE_DIGITS[value[1]] ?? 0;
+    return 10 + unit;
+  }
+  if (value.endsWith("\u5341")) {
+    return (CHINESE_DIGITS[value[0]] ?? 0) * 10;
+  }
+  if (value.includes("\u5341")) {
+    const parts = value.split("\u5341");
+    return (CHINESE_DIGITS[parts[0]] ?? 0) * 10 + (CHINESE_DIGITS[parts[1]] ?? 0);
+  }
+  if (value.startsWith("\u5EFF")) {
+    const unit = CHINESE_DIGITS[value[1]] ?? 0;
+    return 20 + unit;
+  }
+  if (value.startsWith("\u5345")) {
+    const unit = CHINESE_DIGITS[value[1]] ?? 0;
+    return 30 + unit;
+  }
+  return CHINESE_DIGITS[value] ?? Number.NaN;
+}
+
+function parseLunarMonth(value) {
+  if (!value) return Number.NaN;
+  const cleaned = value.replace("\u6708", "");
+  if (Object.prototype.hasOwnProperty.call(CHINESE_MONTH_ALIAS, cleaned)) {
+    return CHINESE_MONTH_ALIAS[cleaned];
+  }
+  return chineseNumberToInt(cleaned);
+}
+
+function getLunarDateParts(date) {
+  if (!lunarFormatter) return null;
+  try {
+    const parts = lunarFormatter.formatToParts(date);
+    const monthPart = parts.find((item) => item.type === "month")?.value ?? "";
+    const dayPart = parts.find((item) => item.type === "day")?.value ?? "";
+    const isLeap = monthPart.includes("\u95F0");
+    const month = parseLunarMonth(monthPart.replace("\u95F0", ""));
+    const day = chineseNumberToInt(dayPart);
+    if (Number.isNaN(month) || Number.isNaN(day)) {
+      return null;
+    }
+    return { month, day, isLeap };
+  } catch (error) {
+    console.warn("unable to parse lunar date", error);
+    return null;
+  }
+}
+
+function createLunarFinder(targetMonth, targetDay) {
+  return (baseDate = new Date()) => {
+    if (!lunarFormatter) {
+      const fallback = new Date(baseDate.getFullYear(), 9, 13);
+      if (fallback < baseDate) {
+        fallback.setFullYear(fallback.getFullYear() + 1);
+      }
+      return fallback;
+    }
+
+    const start = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate());
+    for (let offset = 0; offset < 730; offset += 1) {
+      const probe = new Date(start);
+      probe.setDate(start.getDate() + offset);
+      const lunar = getLunarDateParts(probe);
+      if (!lunar) continue;
+      if (!lunar.isLeap && lunar.month === targetMonth && lunar.day === targetDay) {
+        return probe;
+      }
+    }
+
+    const fallback = new Date(baseDate.getFullYear() + 1, 9, 13);
+    return fallback;
+  };
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   setupNavigation();
   setupCountdown();
@@ -19,6 +133,7 @@ document.addEventListener("DOMContentLoaded", () => {
   setupWishBoard();
   setupGame();
   setupMusic();
+  setupLantern();
   setupWishCards();
 });
 
@@ -42,43 +157,69 @@ function setupCountdown() {
   const container = select("#countdown");
   if (!container) return;
 
-  const update = () => {
+  const findNextTarget = () => {
     const now = new Date();
-    const currentYear = now.getFullYear();
-    const targetMonth = 9; // October (0-indexed)
-    const targetDate = 31;
+    const target = new Date(now.getFullYear(), 10, 2);
+    if (target <= now) {
+      target.setFullYear(target.getFullYear() + 1);
+    }
+    return target;
+  };
 
-    let target = new Date(currentYear, targetMonth, targetDate, 0, 0, 0);
+  let target = findNextTarget();
+  const noticeClass = "countdown__notice";
+
+  const ensureNotice = () => {
+    let notice = container.previousElementSibling;
+    if (!notice || !notice.classList || !notice.classList.contains(noticeClass)) {
+      notice = document.createElement("p");
+      notice.className = noticeClass;
+      container.parentElement?.insertBefore(notice, container);
+    }
+    return notice;
+  };
+
+  const labels = [
+    { label: t('%E5%A4%A9'), key: "days" },
+    { label: t('%E5%B0%8F%E6%97%B6'), key: "hours" },
+    { label: t('%E5%88%86%E9%92%9F'), key: "minutes" },
+    { label: t('%E7%A7%92'), key: "seconds" },
+  ];
+
+  const render = () => {
+    const now = new Date();
     if (now > target) {
-      target = new Date(currentYear + 1, targetMonth, targetDate, 0, 0, 0);
+      target = findNextTarget();
     }
 
-    const diff = target.getTime() - now.getTime();
-    const totalSeconds = Math.max(Math.floor(diff / 1000), 0);
-    const days = Math.floor(totalSeconds / 86400);
-    const hours = Math.floor((totalSeconds % 86400) / 3600);
-    const minutes = Math.floor((totalSeconds % 3600) / 60);
-    const seconds = totalSeconds % 60;
+    const diff = Math.max(target.getTime() - now.getTime(), 0);
+    const totalSeconds = Math.floor(diff / 1000);
+    const chunks = {
+      days: Math.floor(totalSeconds / 86400),
+      hours: Math.floor((totalSeconds % 86400) / 3600),
+      minutes: Math.floor((totalSeconds % 3600) / 60),
+      seconds: totalSeconds % 60,
+    };
+
+    const notice = ensureNotice();
+    const month = String(target.getMonth() + 1).padStart(2, "0");
+    const day = String(target.getDate()).padStart(2, "0");
+    notice.textContent = `${t('%E4%B8%8B%E6%AC%A1%E7%94%9F%E6%97%A5')}\uFF1A${target.getFullYear()}-${month}-${day}`;
 
     container.innerHTML = "";
-    [
-      { label: t('%E5%A4%A9'), value: days },
-      { label: t('%E5%B0%8F%E6%97%B6'), value: hours },
-      { label: t('%E5%88%86%E9%92%9F'), value: minutes },
-      { label: t('%E7%A7%92'), value: seconds },
-    ].forEach(({ label, value }) => {
+    labels.forEach(({ label, key }) => {
       const cell = document.createElement("div");
       cell.className = "countdown__cell";
       cell.innerHTML = `
-        <span class="countdown__value">${String(value).padStart(2, "0")}</span>
+        <span class="countdown__value">${String(chunks[key]).padStart(2, "0")}</span>
         <span class="countdown__label">${label}</span>
       `;
       container.appendChild(cell);
     });
   };
 
-  update();
-  setInterval(update, 1000);
+  render();
+  setInterval(render, 1000);
 }
 
 function setupMap() {
@@ -116,7 +257,7 @@ function setupWishBoard() {
     event.preventDefault();
     const formData = new FormData(form);
     const name = (formData.get("wishName") || "").toString().trim();
-    const message = (formData.get("wishMessage") || "").toString().trim();
+    the message = (formData.get("wishMessage") || "").toString().trim();
     if (!name || !message) return;
 
     const wish = {
@@ -133,12 +274,83 @@ function setupWishBoard() {
   });
 }
 
+function setupLantern() {
+  const stage = select("#lanternStage");
+  const sky = select("#lanternSky");
+  const launchBtn = select("#lanternLaunch");
+  const tags = selectAll(".lantern-tag");
+  const log = select("#lanternLog");
+  if (!stage || !sky || !launchBtn || !log) return;
+
+  let currentWish = tags[0]?.dataset.wish || t('%E4%B8%AD%E5%8E%9F%E7%83%AD%E6%83%85');
+  const logEntries = [];
+
+  const updateTags = (activeTag) => {
+    tags.forEach((tag) => {
+      tag.classList.toggle("is-active", tag === activeTag);
+    });
+  };
+
+  const setCurrentWish = (wish, button) => {
+    currentWish = wish;
+    updateTags(button);
+    stage.setAttribute("data-selected", wish);
+  };
+
+  tags.forEach((tag) => {
+    tag.addEventListener("click", () => {
+      setCurrentWish(tag.dataset.wish || currentWish, tag);
+    });
+  });
+
+  if (tags.length > 0) {
+    setCurrentWish(tags[0].dataset.wish || currentWish, tags[0]);
+  }
+
+  const addLogEntry = (message) => {
+    const now = new Date();
+    const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+    logEntries.unshift(`${time} ${message}`);
+    logEntries.splice(4);
+    log.innerHTML = logEntries.map((entry) => `<span>${sanitizeHTML(entry)}</span>`).join("");
+  };
+
+  const launchLantern = () => {
+    const wish = currentWish || t('%E4%B8%AD%E5%8E%9F%E7%83%AD%E6%83%85');
+    const lantern = document.createElement("div");
+    lantern.className = "lantern-item";
+    lantern.innerHTML = `<span>${sanitizeHTML(wish)}</span>`;
+    lantern.style.setProperty("--x", `${10 + Math.random() * 80}%`);
+    sky.appendChild(lantern);
+
+    requestAnimationFrame(() => lantern.classList.add("is-floating"));
+    setTimeout(() => {
+      lantern.classList.add("is-faded");
+      lantern.addEventListener("transitionend", () => lantern.remove(), { once: true });
+    }, 6000);
+    addLogEntry(wish);
+  };
+
+  launchBtn.addEventListener("click", () => {
+    launchLantern();
+  });
+
+  launchBtn.addEventListener("keypress", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      launchLantern();
+    }
+  });
+
+  setTimeout(() => launchLantern(), 800);
+}
+
 function renderWish(container, wish, prepend = false) {
   const item = document.createElement("article");
   item.className = "wish-card-item";
   const formatted = formatTimestamp(wish.timestamp);
   item.innerHTML = `
-    <strong>${sanitizeHTML(wish.name)} <small>? ${formatted}</small></strong>
+    <strong>${sanitizeHTML(wish.name)} <small>&#x00B7; ${formatted}</small></strong>
     <p>${sanitizeHTML(wish.message)}</p>
   `;
   if (prepend && container.firstChild) {
@@ -153,255 +365,4 @@ function renderWish(container, wish, prepend = false) {
 function formatTimestamp(timestamp) {
   try {
     const date = new Date(timestamp);
-    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(
-      date.getDate()
-    ).padStart(2, "0")}`;
-  } catch (error) {
-    return t('%E6%AD%A4%E5%88%BB');
-  }
-}
-
-function sanitizeHTML(value) {
-  const temp = document.createElement("div");
-  temp.textContent = value;
-  return temp.innerHTML;
-}
-
-function setupGame() {
-  const container = select("#gameOptions");
-  const counter = select("#starCounter");
-  const resetBtn = select("#resetGame");
-  if (!container || !counter || !resetBtn) return;
-
-  const options = [
-    { text: t('%E9%BB%98%E5%A5%91%E5%AE%B5%E5%A4%9C%E7%9B%B4%E6%92%AD'), correct: true },
-    { text: t('%E5%87%8C%E6%99%A8%E9%9B%AA%E5%9C%B0%E5%90%88%E5%BD%B1'), correct: true },
-    { text: t('%E7%99%BD%E4%BF%84%E5%9C%B0%E9%93%81%E8%BF%B7%E8%B7%AF'), correct: false },
-    { text: t('%E4%B8%AD%E6%96%87%E8%AF%97%E6%9C%97%E8%AF%B5'), correct: true },
-    { text: t('%E9%9A%8F%E6%9C%BA%E8%A1%97%E5%A4%B4%E8%AF%B4%E5%94%B1'), correct: false },
-    { text: t('%E9%9A%94%E7%A9%BA%E5%90%8C%E6%AD%A5%E8%BF%BD%E5%89%A7'), correct: true },
-    { text: t('%E5%AE%BF%E8%88%8D%E7%86%AC%E5%A4%9C%E5%8A%A0%E7%8F%AD'), correct: false },
-    { text: t('%E6%98%9F%E7%A9%BA%E8%BF%9E%E7%BA%BF'), correct: true },
-  ];
-
-  let collected = new Set(readState(STATE_KEYS.stars, []));
-
-  const renderStars = () => {
-    const count = collected.size;
-    const total = 3;
-    const stars = Array.from({ length: total }, (_, index) =>
-      index < Math.min(count, total) ? "\u2605" : "\u2606"
-    ).join(" ");
-    counter.textContent = `${t('%E5%B7%B2%E6%89%BE%E5%88%B0%EF%BC%9A')}${stars}`;
-  };
-
-  const reorderOptions = () => options.sort(() => Math.random() - 0.5);
-
-  const renderOptions = () => {
-    container.innerHTML = "";
-    reorderOptions().forEach((option) => {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "game-option";
-      button.textContent = option.text;
-
-      if (collected.has(option.text)) {
-        button.classList.add("correct");
-      }
-
-      button.addEventListener("click", () => {
-        if (option.correct) {
-          collected.add(option.text);
-          button.classList.add("correct");
-          writeState(STATE_KEYS.stars, [...collected]);
-        } else {
-          button.classList.add("wrong");
-          setTimeout(() => button.classList.remove("wrong"), 1200);
-        }
-        if (collected.size >= 3) {
-          showCelebrationMessage();
-        }
-        renderStars();
-      });
-
-      container.appendChild(button);
-    });
-    renderStars();
-  };
-
-  resetBtn.addEventListener("click", () => {
-    collected = new Set();
-    writeState(STATE_KEYS.stars, []);
-    renderOptions();
-  });
-
-  renderOptions();
-}
-
-function showCelebrationMessage() {
-  const message = document.createElement("div");
-  message.className = "celebration-toast";
-  message.textContent = t('%E6%81%AD%E5%96%9C%EF%BC%8C%E7%81%BF%E7%83%82%E6%98%9F%E5%BE%BD%E5%B7%B2%E9%9B%86%E9%BD%90%EF%BC%81');
-  document.body.appendChild(message);
-  setTimeout(() => message.classList.add("is-visible"), 20);
-  setTimeout(() => {
-    message.classList.remove("is-visible");
-    message.addEventListener("transitionend", () => message.remove(), { once: true });
-  }, 2500);
-  launchSparkles();
-}
-
-function setupMusic() {
-  const toggle = select("#musicToggle");
-  const audio = select("#bgMusic");
-  if (!toggle || !audio) return;
-
-  let isPlaying = false;
-
-  toggle.addEventListener("click", async () => {
-    if (!isPlaying) {
-      try {
-        await audio.play();
-        isPlaying = true;
-        toggle.setAttribute("aria-pressed", "true");
-        toggle.querySelector(".playlist__label").textContent = t('%E6%9A%82%E5%81%9C%E7%94%9F%E6%97%A5%E7%B2%BE%E9%80%89');
-      } catch (error) {
-        console.warn(t('%E6%97%A0%E6%B3%95%E8%87%AA%E5%8A%A8%E6%92%AD%E6%94%BE%E9%9F%B3%E4%B9%90%EF%BC%9A'), error);
-      }
-    } else {
-      audio.pause();
-      isPlaying = false;
-      toggle.setAttribute("aria-pressed", "false");
-      toggle.querySelector(".playlist__label").textContent = t('%E6%92%AD%E6%94%BE%E7%94%9F%E6%97%A5%E7%B2%BE%E9%80%89');
-    }
-  });
-}
-
-function setupWishCards() {
-  selectAll(".wish-card").forEach((card) => {
-    card.addEventListener("click", () => card.classList.toggle("is-flipped"));
-    card.addEventListener("keypress", (event) => {
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        card.classList.toggle("is-flipped");
-      }
-    });
-    card.setAttribute("tabindex", "0");
-  });
-}
-
-function readState(key, fallback) {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : fallback;
-  } catch (error) {
-    console.warn(t('%E8%AF%BB%E5%8F%96%E6%9C%AC%E5%9C%B0%E5%AD%98%E5%82%A8%E5%A4%B1%E8%B4%A5'), error);
-    return fallback;
-  }
-}
-
-function writeState(key, value) {
-  try {
-    localStorage.setItem(key, JSON.stringify(value));
-  } catch (error) {
-    console.warn(t('%E5%86%99%E5%85%A5%E6%9C%AC%E5%9C%B0%E5%AD%98%E5%82%A8%E5%A4%B1%E8%B4%A5'), error);
-  }
-}
-
-function setupFireworks() {
-  const canvas = select("#fireworksCanvas");
-  const trigger = select("#fireworksTrigger");
-  if (!canvas || !trigger) return;
-
-  const ctx = canvas.getContext("2d");
-  let width;
-  let height;
-  let particles = [];
-  let animationFrame;
-
-  const resize = () => {
-    width = canvas.width = window.innerWidth;
-    height = canvas.height = window.innerHeight;
-  };
-
-  window.addEventListener("resize", resize);
-  resize();
-
-  class Particle {
-    constructor(x, y, color) {
-      this.x = x;
-      this.y = y;
-      this.radius = Math.random() * 2 + 1;
-      this.color = color;
-      const angle = Math.random() * Math.PI * 2;
-      const speed = Math.random() * 4 + 2;
-      this.dx = Math.cos(angle) * speed;
-      this.dy = Math.sin(angle) * speed;
-      this.alpha = 1;
-      this.decay = Math.random() * 0.015 + 0.008;
-    }
-
-    update() {
-      this.x += this.dx;
-      this.y += this.dy;
-      this.dy += 0.02;
-      this.alpha -= this.decay;
-    }
-
-    draw(context) {
-      context.save();
-      context.globalAlpha = this.alpha;
-      context.beginPath();
-      context.fillStyle = this.color;
-      context.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
-      context.fill();
-      context.restore();
-    }
-  }
-
-  const colors = ["#ffd369", "#ff9f68", "#8a7bff", "#ff6bc7"];
-
-  const launch = (x = width / 2, y = height * 0.35) => {
-    for (let i = 0; i < 80; i += 1) {
-      particles.push(new Particle(x, y, colors[Math.floor(Math.random() * colors.length)]));
-    }
-    animate();
-  };
-
-  const animate = () => {
-    if (particles.length === 0) {
-      cancelAnimationFrame(animationFrame);
-      ctx.clearRect(0, 0, width, height);
-      return;
-    }
-
-    animationFrame = requestAnimationFrame(animate);
-    ctx.fillStyle = "rgba(5, 7, 20, 0.25)";
-    ctx.fillRect(0, 0, width, height);
-
-    particles = particles.filter((particle) => particle.alpha > 0);
-    particles.forEach((particle) => {
-      particle.update();
-      particle.draw(ctx);
-    });
-  };
-
-  trigger.addEventListener("click", () => {
-    launch();
-  });
-
-  canvas.addEventListener("click", (event) => {
-    const rect = canvas.getBoundingClientRect();
-    launch(event.clientX - rect.left, event.clientY - rect.top);
-  });
-
-  // ????
-  setTimeout(() => launch(width * 0.65, height * 0.4), 1200);
-}
-
-function launchSparkles() {
-  const trigger = select("#fireworksTrigger");
-  if (trigger) {
-    trigger.click();
-  }
-}
+    return ```
